@@ -9,18 +9,61 @@ on:
         options:
         - 'lancelot'
         - 'merlin'
+        - 'selene'
+      build_ksun:
+        description: 'Build KernelSU-Next A13+'
+        required: true
+        default: true
+        type: boolean
+      build_ksun_old:
+        description: 'Build KernelSU-Next A11+'
+        required: true
+        default: true
+        type: boolean
+      build_xxksu:
+        description: 'Build xxksu A13+'
+        required: true
+        default: true
+        type: boolean
+      build_xxksu_old:
+        description: 'Build xxksu A11+'
+        required: true
+        default: true
+        type: boolean
 
 jobs:
+  generate-build-matrix:
+    name: What to build?
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        name: Generate build matrix
+        run: |
+          targets=()
+          if [[ "${{ github.event.inputs.build_ksun }}" == "true" ]]; then targets+=("ksun"); fi
+          if [[ "${{ github.event.inputs.build_ksun_old }}" == "true" ]]; then targets+=("ksun-old"); fi
+          if [[ "${{ github.event.inputs.build_xxksu }}" == "true" ]]; then targets+=("xxksu"); fi
+          if [[ "${{ github.event.inputs.build_xxksu_old }}" == "true" ]]; then targets+=("xxksu-old"); fi
+          json=$(printf '%s\n' "${targets[@]}" | jq -R . | jq -s '{target: .}')
+          echo "matrix<<EOF" >> $GITHUB_OUTPUT
+          echo "$json" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
   build:
-    name: Build Kernel by ${{ github.actor }}
+    needs: generate-build-matrix
     runs-on: ubuntu-24.04
     env:
       DEVICE: ${{ github.event.inputs.select_device }}
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
       CCACHE_HARDLINK: "true"
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-build-matrix.outputs.matrix) }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Maximize build space
       if: env.REMOVE_UNUSED_PACKAGES == 'true'
@@ -35,7 +78,20 @@ jobs:
 
     - name: Prepare environment
       run: |
-        grep -v -E "^#|^\n" config.env | sed 's/ #.*//; s/#.*//' >> $GITHUB_ENV
+        TARGET_CONFIG_FILENAME="${{ matrix.target }}"
+        TARGET_CONFIG_FILENAME="${TARGET_CONFIG_FILENAME/-old/}"
+        TARGET_CONFIG_FILENAME_SUFFIX=$TARGET_CONFIG_FILENAME
+        grep -v -E "^#|^\n" config-${TARGET_CONFIG_FILENAME_SUFFIX}.env | sed 's/ #.*//; s/#.*//' >> $GITHUB_ENV
+        if [[ "${{ matrix.target }}" == *"-old" ]]; then
+            echo "ANDROID_TAG=[A11+]" >> $GITHUB_ENV
+        else
+            echo "ANDROID_TAG=[A13+]" >> $GITHUB_ENV
+        fi
+
+    - name: Check if old Android build
+      if: contains(matrix.target, 'old')
+      run: |
+        echo "OLD_ANDROID_SUPPORT=true" >> $GITHUB_ENV
 
     - name: Set swap to 10G
       uses: pierotofy/set-swap-space@master
@@ -44,7 +100,7 @@ jobs:
 
     - name: Setup kernel build environment
       run: |
-        echo "BUILD_TIME=$(TZ=UTC date "+%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "BUILD_TIME=$(TZ=Asia/Dhaka date "+%Y%m%d%H%M")" >> $GITHUB_ENV
         sudo apt-get update
         sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses6 libncurses-dev libsdl1.2-dev libssl-dev libwxgtk3.2-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
@@ -184,7 +240,7 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         curl -LSs "$KERNELSU_SETUP_SOURCE" | bash -s ${{ env.KERNELSU_TAG }}
         KSU_VERSION="_$(cd $(echo "$KERNELSU_SETUP_SOURCE" | cut -d/ -f5) || cd KernelSU && expr $(git rev-list --count HEAD) + 10200)"
-        echo "UPLOADNAME=-$(echo "$KERNELSU_SETUP_SOURCE" | cut -d/ -f5)$KSU_VERSION" >> $GITHUB_ENV
+        echo "UPLOADNAME=-KernelSU-${{ matrix.target }}$KSU_VERSION" >> $GITHUB_ENV
         if [ ${{ env.KSU_REVERT }} = true ]; then
             git apply $GITHUB_WORKSPACE/patches/KSU_REVERT.patch
         fi
@@ -208,6 +264,16 @@ jobs:
                 echo "CONFIG_HAVE_KPROBES=y" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
                 echo "CONFIG_KPROBE_EVENTS=y" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
             fi
+        for config in CONFIG_KSU=y \
+                      CONFIG_KSU_TAMPER_SYSCALL_TABLE=y \
+                      CONFIG_KSU_SUSFS=y \
+                      CONFIG_KSU_SUSFS_SUS_MAP=y \
+                      CONFIG_KSU_SUSFS_SUS_MOUNT=y \
+                      CONFIG_KSU_SUSFS_TRY_UMOUNT=y \
+                      CONFIG_KSU_SUSFS_SUS_MEMFD=y
+        do
+        echo "$config" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
+        done
         fi
         if [ ${{ env.ADD_OVERLAYFS_CONFIG }} = true ]; then
             echo "CONFIG_OVERLAY_FS=y" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
@@ -321,6 +387,22 @@ jobs:
            fi
        fi
 
+    - name: Patch xxksu Ultra KPM
+      if: env.CHECK_FILE_IS_OK == 'true' && env.KPM_SUPPORT == 'true'
+      run: |
+        OUT_BOOT=$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot
+        mkdir $GITHUB_WORKSPACE/kernel_workspace/xxksu-Patch
+        cd $GITHUB_WORKSPACE/kernel_workspace/xxksu-Patch
+        wget ${{ env.KPM_URL }}
+        cp $OUT_BOOT/Image ./
+        cp $OUT_BOOT/dts/mediatek/mt6768.dtb ./
+        chmod +x patch_linux
+        ./patch_linux
+        mv -f oImage Image
+        gzip -k Image
+        cat Image.gz *.dtb > Image.gz-dtb
+        mv -f Image.gz-dtb $OUT_BOOT/${{ env.KERNEL_IMAGE_NAME }}
+
     - name: Create flashable Anykernel3 zip
       if: env.CHECK_FILE_IS_OK == 'true' && env.USE_ANYKERNEL3 == 'true'
       run: |
@@ -368,30 +450,38 @@ jobs:
             exit 1
         fi
 
+    - name: Export kernel name from defconfig
+      run: |
+        DEFCONFIG_FILE="kernel_workspace/android-kernel/arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+        RAW_LOCALVERSION=$(grep -oP 'CONFIG_LOCALVERSION="\K[^"]+' "$DEFCONFIG_FILE")
+        KERNEL_NAME=$(echo "$RAW_LOCALVERSION" | sed 's/^-//')
+        [ -z "$KERNEL_NAME" ] && KERNEL_NAME="CustomKernel"
+        echo "KERNEL_LOCALVERSION=${KERNEL_NAME}" >> $GITHUB_ENV
+
     - name: Upload AnyKernel3
       if: env.CHECK_FILE_IS_OK == 'true'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
-        name: AnyKernel3${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
+        name: ${{ env.ANDROID_TAG }}${{ env.KERNEL_LOCALVERSION }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
         path: kernel_workspace/AnyKernel3/*
 
-    - name: Upload kernel image
+    - name: Upload Kernel Image
       if: env.CHECK_FILE_IS_OK == 'true'
-      uses: actions/upload-artifact@v4
-      with:
+      uses: actions/upload-artifact@v6
+      with:        
         name: ${{ env.KERNEL_IMAGE_NAME }}${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
         path: kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}
 
     - name: Upload DTBO image
       if: env.CHECK_DTBO_IS_OK == 'true'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: dtbo-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
         path: kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/dtbo.img
 
     - name: Upload boot image
       if: env.MAKE_BOOT_IMAGE_IS_OK == 'true'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: boot${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
         path: kernel_workspace/boot.img
