@@ -9,6 +9,7 @@ on:
         options:
         - 'lancelot'
         - 'merlin'
+        - 'selene'
       build_ksun:
         description: 'Build KernelSU-Next A13+'
         required: true
