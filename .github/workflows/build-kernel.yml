@@ -9,6 +9,7 @@ on:
         options:
         - 'lancelot'
         - 'merlin'
+        - 'selene'
 
 jobs:
   build:
