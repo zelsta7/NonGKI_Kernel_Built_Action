@@ -277,25 +277,51 @@ jobs:
             echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
             echo "CONFIG_OVERLAY_FS_INDEX=y" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
         fi
-        if [ ${{ env.ADD_APATCH_SUPPORT }} = true ]; then
-                sed -i 's/# CONFIG_DEBUG_KERNEL is not set/CONFIG_DEBUG_KERNEL=y/g' arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                sed -i 's/CONFIG_DEBUG_KERNEL=n/CONFIG_DEBUG_KERNEL=y/g' arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                echo "CONFIG_DEBUG_KERNEL=y" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/g' arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                sed -i 's/CONFIG_KALLSYMS=n/CONFIG_KALLSYMS=y/g' arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                echo "CONFIG_KALLSYMS=y" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/g' arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                sed -i 's/CONFIG_KALLSYMS_ALL=n/CONFIG_KALLSYMS_ALL=y/g' arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                echo "CONFIG_KALLSYMS_ALL=y" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                sed -i 's/# CONFIG_KALLSYMS_BASE_RELATIVE is not set/CONFIG_KALLSYMS_BASE_RELATIVE=y/g' arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                sed -i 's/CONFIG_KALLSYMS_BASE_RELATIVE=n/CONFIG_KALLSYMS_BASE_RELATIVE=y/g' arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                echo "CONFIG_KALLSYMS_BASE_RELATIVE=y" >> arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
-                if [ ${{ env.FIX_APATCH_OPENELA }} = true ]; then
-                    git apply $GITHUB_WORKSPACE/patches/FIX_APATCH_OPENELA.patch || {
-                    git apply $GITHUB_WORKSPACE/patches/REVERT_ADD_GET_CRED_RCU.patch
-                    git apply $GITHUB_WORKSPACE/patches/FIX_APATCH_OPENELA.patch
-                    }
+        if [[ "${ADD_APATCH_SUPPORT:-false}" == "true" ]]; then
+            sed -i 's/# CONFIG_DEBUG_KERNEL is not set/CONFIG_DEBUG_KERNEL=y/g' \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+            sed -i 's/CONFIG_DEBUG_KERNEL=n/CONFIG_DEBUG_KERNEL=y/g' \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+            echo "CONFIG_DEBUG_KERNEL=y" >> \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+
+            sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/g' \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+            sed -i 's/CONFIG_KALLSYMS=n/CONFIG_KALLSYMS=y/g' \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+            echo "CONFIG_KALLSYMS=y" >> \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+
+            sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/g' \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+            sed -i 's/CONFIG_KALLSYMS_ALL=n/CONFIG_KALLSYMS_ALL=y/g' \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+            echo "CONFIG_KALLSYMS_ALL=y" >> \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+
+            sed -i 's/# CONFIG_KALLSYMS_BASE_RELATIVE is not set/CONFIG_KALLSYMS_BASE_RELATIVE=y/g' \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+            sed -i 's/CONFIG_KALLSYMS_BASE_RELATIVE=n/CONFIG_KALLSYMS_BASE_RELATIVE=y/g' \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+            echo "CONFIG_KALLSYMS_BASE_RELATIVE=y" >> \
+                "arch/${KERNEL_ARCH}/configs/${DEVICE}_defconfig"
+
+            if [[ "${FIX_APATCH_OPENELA:-false}" == "true" ]]; then
+                echo "FIX_APATCH_OPENELA=true; checking patch compatibility"
+
+                if git apply --check \
+                    "$GITHUB_WORKSPACE/patches/FIX_APATCH_OPENELA.patch"; then
+                    git apply \
+                        "$GITHUB_WORKSPACE/patches/FIX_APATCH_OPENELA.patch"
+                else
+                    echo "::error::FIX_APATCH_OPENELA.patch does not apply to this kernel source"
+                    exit 1
                 fi
+            else
+                echo "Skipping FIX_APATCH_OPENELA because FIX_APATCH_OPENELA=${FIX_APATCH_OPENELA:-false}"
+            fi
+        else
+            echo "Skipping APatch configuration because ADD_APATCH_SUPPORT=${ADD_APATCH_SUPPORT:-false}"
         fi
         if [ ${{ env.DISABLE_LTO }} = true ]; then
             sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig
