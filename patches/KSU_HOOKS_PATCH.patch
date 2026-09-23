@@ -1,236 +1,80 @@
-diff --git a/fs/exec.c b/fs/exec.c
---- a/fs/exec.c
-+++ b/fs/exec.c
-@@
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+__attribute__((hot))
-+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
-+				void *argv, void *envp, int *flags);
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -2328,10 +2328,21 @@
+ 			    const struct task_security_struct *old_tsec,
+ 			    const struct task_security_struct *new_tsec)
+ {
++#ifdef CONFIG_KSU
++	static u32 ksu_sid;
++	char *secdata;
++#endif
+ 	int nnp = (bprm->unsafe & LSM_UNSAFE_NO_NEW_PRIVS);
+ 	int nosuid = !mnt_may_suid(bprm->file->f_path.mnt);
++#ifdef CONFIG_KSU
++	int rc, error;
++#else
+ 	int rc;
++#endif
+ 	u32 av;
++#ifdef CONFIG_KSU
++	u32 seclen;
++#endif
+ 
+ 	if (!nnp && !nosuid)
+ 		return 0; /* neither NNP nor nosuid */
+@@ -2339,6 +2350,20 @@
+ 	if (new_tsec->sid == old_tsec->sid)
+ 		return 0; /* No change in credentials */
+ 
++#ifdef CONFIG_KSU
++	if (!ksu_sid) {
++		security_secctx_to_secid("u:r:su:s0", strlen("u:r:su:s0"), &ksu_sid);
++	}
++	error = security_secid_to_secctx(old_tsec->sid, &secdata, &seclen);
++	if (!error) {
++		rc = strcmp("u:r:init:s0", secdata);
++		security_release_secctx(secdata, seclen);
++		if (rc == 0 && new_tsec->sid == ksu_sid) {
++			return 0;
++		}
++	}
 +#endif
 +
- int do_execve(struct filename *filename,
- 	const char __user *const __user *__argv,
- 	const char __user *const __user *__envp)
- {
- 	struct user_arg_ptr argv = { .ptr.native = __argv };
- 	struct user_arg_ptr envp = { .ptr.native = __envp };
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
-+#endif
- 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
- }
-@@
- static int compat_do_execve(struct filename *filename,
- 	const compat_uptr_t __user *__argv,
- 	const compat_uptr_t __user *__envp)
- {
-@@
- 	struct user_arg_ptr argv = {
- 		.is_compat = true,
- 		.ptr.compat = __argv,
- 	};
- 	struct user_arg_ptr envp = {
- 		.is_compat = true,
- 		.ptr.compat = __envp,
- 	};
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
-+#endif
- 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
- }
- 
- 
-diff --git a/fs/open.c b/fs/open.c
---- a/fs/open.c
-+++ b/fs/open.c
-@@
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+__attribute__((hot))
-+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
-+				int *mode, int *flags);
-+#endif
-+
- /*
-  * access() needs to use the real uid/gid, not the effective uid/gid.
-  * We do this by temporarily clearing all FS-related capabilities and
-  * set back after the access check.
-  */
-@@
- SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
- {
- 	int res;
- 	unsigned int lookup_flags = LOOKUP_FOLLOW;
- 
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
-+#endif
-+
- 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
- 		return -EINVAL;
- 
- 	if (filename == NULL)
- 		return -EFAULT;
- 
- 
-diff --git a/fs/read_write.c b/fs/read_write.c
---- a/fs/read_write.c
-+++ b/fs/read_write.c
-@@
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,
-+				char __user **buf_ptr, size_t *count_ptr);
-+#endif
-+
- SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
- {
- 	struct fd f = fdget_pos(fd);
- 	ssize_t ret = -EBADF;
- 
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	ksu_handle_sys_read(fd, &buf, &count);
-+#endif
-+
- 	if (f.file) {
- 		loff_t pos = file_pos_read(f.file);
- 		ret = vfs_read(f.file, buf, count, &pos);
- 		if (ret < 0)
- 			goto out;
- 
- 
-diff --git a/fs/stat.c b/fs/stat.c
---- a/fs/stat.c
-+++ b/fs/stat.c
-@@
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+__attribute__((hot))
-+extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
-+				int *flags);
-+
-+extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
-+#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
-+extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);
-+#endif
-+#endif
-+
- #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
- SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
- 		struct stat __user *, statbuf, int, flag)
- {
- 	struct kstat stat;
- 	int error;
- 
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	ksu_handle_stat(&dfd, &filename, &flag);
-+#endif
- 	error = vfs_fstatat(dfd, filename, &stat, flag);
- 	if (error)
- 		return error;
-@@
- SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
- {
- 	struct kstat stat;
- 	int error;
- 
- 	error = vfs_fstat(fd, &stat);
- 	if (!error)
- 		error = cp_new_stat(&stat, statbuf);
- 
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	ksu_handle_newfstat_ret(&fd, &statbuf);
-+#endif
- 	return error;
- }
- 
-@@
- SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
- {
- 	struct kstat stat;
- 	int error;
- 
- 	error = vfs_fstat(fd, &stat);
- 	if (!error)
- 		error = cp_new_stat64(&stat, statbuf);
- 
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	ksu_handle_fstat64_ret(&fd, &statbuf);
-+#endif
- 	return error;
- }
- 
-@@
- SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
- 		struct stat64 __user *, statbuf, int, flag)
- {
- 	struct kstat stat;
- 	int error;
- 
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	ksu_handle_stat(&dfd, &filename, &flag);
-+#endif
- 	error = vfs_fstatat(dfd, filename, &stat, flag);
- 	if (error)
- 		return error;
- 
- 
-diff --git a/kernel/reboot.c b/kernel/reboot.c
---- a/kernel/reboot.c
-+++ b/kernel/reboot.c
-@@
- /*
-  * reboot doesn't sync: do that yourself before calling this.
-  */
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
-+		void __user **arg);
-+#endif
-+
- SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
- 		void __user *, arg)
- {
-@@
- 	char buffer[256];
- 	int ret = 0;
- 
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
-+#endif
-+
- 	/* We only trust the superuser with rebooting the system. */
- 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
- 		return -EPERM;
- 
- 
-diff --git a/kernel/sys.c b/kernel/sys.c
+ 	/*
+ 	 * If the policy enables the nnp_nosuid_transition policy capability,
+ 	 * then we permit transitions under NNP or nosuid if the
 --- a/kernel/sys.c
 +++ b/kernel/sys.c
-@@
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
+@@ -594,6 +594,11 @@
+ }
+ 
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
 +__attribute__((hot))
 +extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
 +#endif
 +
  /*
   * This function implements a generic ability to update ruid, euid,
-  * and suid.
-  */
-@@
+  * and suid.  This allows you to implement the 4.4 compatible seteuid().
+@@ -606,6 +611,10 @@
  	int retval;
  	kuid_t kruid, keuid, ksuid;
  
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
++#ifdef CONFIG_KSU_MANUAL_HOOK
 +	(void)ksu_handle_setresuid(ruid, euid, suid);
 +#endif
 +
  	kruid = make_kuid(ns, ruid);
  	keuid = make_kuid(ns, euid);
  	ksuid = make_kuid(ns, suid);
- 
- 
-diff --git a/drivers/input/input.c b/drivers/input/input.c
 --- a/drivers/input/input.c
 +++ b/drivers/input/input.c
-@@
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
+@@ -436,11 +436,20 @@
+  * to 'seed' initial state of a switch or initial position of absolute
+  * axis, etc.
+  */
++#ifdef CONFIG_KSU_MANUAL_HOOK
 +extern __attribute__((cold)) int ksu_handle_input_handle_event(
 +			unsigned int *type, unsigned int *code, int *value);
 +#endif
@@ -240,56 +84,165 @@ diff --git a/drivers/input/input.c b/drivers/input/input.c
  {
  	unsigned long flags;
  
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
++#ifdef CONFIG_KSU_MANUAL_HOOK
 +	ksu_handle_input_handle_event(&type, &code, &value);
 +#endif
 +
  	if (is_event_supported(type, dev->evbit, EV_MAX)) {
  
+ 		spin_lock_irqsave(&dev->event_lock, flags);
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -411,6 +411,12 @@
+ 	return old_cred;
+ }
  
-diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
---- a/security/selinux/hooks.c
-+++ b/security/selinux/hooks.c
-@@
- static int check_nnp_nosuid(const struct linux_binprm *bprm,
- 			    const struct task_security_struct *old_tsec,
- 			    const struct task_security_struct *new_tsec)
- {
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	static u32 ksu_sid;
-+	char *secdata;
-+#endif
- 	int nnp = (bprm->unsafe & LSM_UNSAFE_NO_NEW_PRIVS);
- 	int nosuid = !mnt_may_suid(bprm->file->f_path.mnt);
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	int rc, error;
-+#else
- 	int rc;
-+#endif
- 	u32 av;
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	u32 seclen;
-+#endif
- 
- 	if (!nnp && !nosuid)
- 		return 0; /* neither NNP nor nosuid */
- 
- 	if (new_tsec->sid == old_tsec->sid)
- 		return 0; /* No change in credentials */
- 
-+#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_HOOK)
-+	if (!ksu_sid) {
-+		security_secctx_to_secid("u:r:su:s0", strlen("u:r:su:s0"), &ksu_sid);
-+	}
-+	error = security_secid_to_secctx(old_tsec->sid, &secdata, &seclen);
-+	if (!error) {
-+		rc = strcmp("u:r:init:s0", secdata);
-+		security_release_secctx(secdata, seclen);
-+		if (rc == 0 && new_tsec->sid == ksu_sid)
-+			return 0;
-+	}
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++				int *mode, int *flags);
 +#endif
 +
- 	/*
- 	 * If the policy enables the nnp_nosuid_transition policy capability,
- 	 * then we permit transitions under NNP or nosuid if the
+ long do_faccessat(int dfd, const char __user *filename, int mode, int flags)
+ {
+ 	struct path path;
+@@ -419,6 +425,10 @@
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW;
+ 	const struct cred *old_cred = NULL;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_faccessat(&dfd, &filename, &mode, &flags);
++#endif
++
+ 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
+ 		return -EINVAL;
+ 
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -568,14 +568,23 @@
+ 		file->f_pos = pos;
+ }
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,
++				char __user **buf_ptr, size_t *count_ptr);
++#endif
++
+ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ {
+ 	struct fd f = fdget_pos(fd);
+ 	ssize_t ret = -EBADF;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_sys_read(fd, &buf, &count);
++#endif
++
+ 	if (f.file) {
+ 		loff_t pos = file_pos_read(f.file);
+-		
++
+ 		ret = vfs_read(f.file, buf, count, &pos);
+ 		if (ret >= 0)
+ 			file_pos_write(f.file, pos);
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1883,6 +1883,12 @@
+ 	return retval;
+ }
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
++				void *argv, void *envp, int *flags);
++#endif
++
+ static int do_execveat_common(int fd, struct filename *filename,
+ 			      struct user_arg_ptr argv,
+ 			      struct user_arg_ptr envp,
+@@ -1906,6 +1912,10 @@
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
++#endif
++
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
+@@ -1934,7 +1944,11 @@
+ 		.ptr.compat = __envp,
+ 	};
+ 
+-    return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
++#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit ksud and 32-on-64 support
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
++#endif
++
++	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
+ static int compat_do_execveat(int fd, struct filename *filename,
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -383,13 +383,27 @@
+ 
+ #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
++				int *flags);
++
++extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
++#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
++extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr); // optional
++#endif
++#endif
++
+ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 		struct stat __user *, statbuf, int, flag)
+ {
+ 	struct kstat stat;
+ 	int error;
+ 
+-   error = vfs_fstatat(dfd, filename, &stat, flag);
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
++	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+ 	return cp_new_stat(&stat, statbuf);
+@@ -404,6 +418,9 @@
+ 	if (!error)
+ 		error = cp_new_stat(&stat, statbuf);
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_newfstat_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -524,6 +541,9 @@
+ 	if (!error)
+ 		error = cp_new_stat64(&stat, statbuf);
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK // for 32-bit
++	ksu_handle_fstat64_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -533,7 +553,10 @@
+ 	struct kstat stat;
+ 	int error;
+ 
+-    error = vfs_fstatat(dfd, filename, &stat, flag);
++#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit su
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
++	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+ 	return cp_new_stat64(&stat, statbuf);
