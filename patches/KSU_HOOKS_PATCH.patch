@@ -1,151 +1,51 @@
-diff --git a/drivers/input/input.c b/drivers/input/input.c
-index f9f3d6261dc5..328402062b4e 100644
---- a/drivers/input/input.c
-+++ b/drivers/input/input.c
-@@ -377,11 +377,19 @@ static int input_get_disposition(struct input_dev *dev,
- 	return disposition;
- }
- 
-+#ifdef CONFIG_KSU
-+extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
-+#endif
-+
- static void input_handle_event(struct input_dev *dev,
- 			       unsigned int type, unsigned int code, int value)
- {
- 	int disposition = input_get_disposition(dev, type, code, &value);
- 
-+#ifdef CONFIG_KSU
-+	ksu_handle_input_handle_event(&type, &code, &value);
-+#endif
-+
- 	if (disposition != INPUT_IGNORE_EVENT && type != EV_SYN)
- 		add_input_randomness(type, code, value);
- 
-diff --git a/fs/devpts/inode.c b/fs/devpts/inode.c
-index 32f6f1c683d9..50ff75299619 100644
---- a/fs/devpts/inode.c
-+++ b/fs/devpts/inode.c
-@@ -602,6 +602,9 @@ struct dentry *devpts_pty_new(struct pts_fs_info *fsi, int index, void *priv)
- 	return dentry;
- }
- 
-+#ifdef CONFIG_KSU
-+extern int ksu_handle_devpts(struct inode*);
-+#endif
- /**
-  * devpts_get_priv -- get private data for a slave
-  * @pts_inode: inode of the slave
-@@ -610,6 +613,9 @@ struct dentry *devpts_pty_new(struct pts_fs_info *fsi, int index, void *priv)
-  */
- void *devpts_get_priv(struct dentry *dentry)
- {
-+#ifdef CONFIG_KSU
-+	ksu_handle_devpts(dentry->d_inode);
-+#endif
- 	if (dentry->d_sb->s_magic != DEVPTS_SUPER_MAGIC)
- 		return NULL;
- 	return dentry->d_fsdata;
 diff --git a/fs/exec.c b/fs/exec.c
-index ae0a49517ba9..152671d7c088 100644
+index c1ef3b037c1f..6b4ad164cd14 100644
 --- a/fs/exec.c
 +++ b/fs/exec.c
-@@ -1706,6 +1706,12 @@ static int exec_binprm(struct linux_binprm *bprm)
- 	return ret;
+@@ -1862,12 +1862,21 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 	return retval;
  }
  
-+// KernelSU hook
-+#ifdef CONFIG_KSU
-+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
-+			       void *envp, int *flags);
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
++				void *argv, void *envp, int *flags);
 +#endif
 +
- /*
-  * sys_execve() executes a new program.
-  */
-@@ -1720,6 +1726,10 @@ static int do_execveat_common(int fd, struct filename *filename,
- 	struct files_struct *displaced;
- 	int retval;
- 
-+#ifdef CONFIG_KSU
-+	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+ int do_execve(struct filename *filename,
+ 	const char __user *const __user *__argv,
+ 	const char __user *const __user *__envp)
+ {
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
 +#endif
-+
- 	if (IS_ERR(filename))
- 		return PTR_ERR(filename);
- 
-diff --git a/fs/namespace.c b/fs/namespace.c
-index 30772b12aa79..1af5e99b19a8 100644
---- a/fs/namespace.c
-+++ b/fs/namespace.c
-@@ -1730,6 +1730,55 @@ static inline bool may_mandlock(void)
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
  }
- #endif
  
-+#ifdef CONFIG_KSU
-+/*
-+ * path_mounted - check whether path is mounted
-+ * @path: path to check
-+ *
-+ * Determine whether @path refers to the root of a mount.
-+ *
-+ * Return: true if @path is the root of a mount, false if not.
-+ */
-+static inline bool path_mounted(const struct path *path)
-+{
-+	return path->mnt->mnt_root == path->dentry;
-+}
-+
-+static int can_umount(const struct path *path, int flags)
-+{
-+	struct mount *mnt = real_mount(path->mnt);
-+
-+	if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
-+		return -EINVAL;
-+	if (!may_mount())
-+		return -EPERM;
-+	if (path->dentry != path->mnt->mnt_root)
-+		return -EINVAL;
-+	if (!check_mnt(mnt))
-+		return -EINVAL;
-+	if (mnt->mnt.mnt_flags & MNT_LOCKED) /* Check optimistically */
-+		return -EINVAL;
-+	if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
-+		return -EPERM;
-+	return 0;
-+}
-+
-+int path_umount(struct path *path, int flags)
-+{
-+	struct mount *mnt = real_mount(path->mnt);
-+	int ret;
-+
-+	ret = can_umount(path, flags);
-+	if (!ret)
-+		ret = do_umount(mnt, flags);
-+
-+	/* we mustn't call path_put() as that would clear mnt_expiry_mark */
-+	dput(path->dentry);
-+	mntput_no_expire(mnt);
-+	return ret;
-+}
+@@ -1895,6 +1904,9 @@ static int compat_do_execve(struct filename *filename,
+ 		.is_compat = true,
+ 		.ptr.compat = __envp,
+ 	};
++#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit ksud and 32-on-64 support
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
 +#endif
-+
- /*
-  * Now umount can handle mount points as well as block devices.
-  * This is important for filesystems which use unnamed block devices.
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
 diff --git a/fs/open.c b/fs/open.c
-index 3b62683fe332..09d38e67288e 100644
+index 0628bd1ae2ad..fec75b4fbd38 100644
 --- a/fs/open.c
 +++ b/fs/open.c
 @@ -354,6 +354,12 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
  	return error;
  }
  
-+// KernelSU hook
-+#ifdef CONFIG_KSU
-+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
-+			        int *flags);
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++				int *mode, int *flags);
 +#endif
 +
  /*
@@ -155,7 +55,7 @@ index 3b62683fe332..09d38e67288e 100644
  	int res;
  	unsigned int lookup_flags = LOOKUP_FOLLOW;
  
-+#ifdef CONFIG_KSU
++#ifdef CONFIG_KSU_MANUAL_HOOK
 +	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
 +#endif
 +
@@ -163,56 +63,169 @@ index 3b62683fe332..09d38e67288e 100644
  		return -EINVAL;
  
 diff --git a/fs/read_write.c b/fs/read_write.c
-index 0da6e4f19d7f..50fe43936953 100644
+index 650fc7e0f3a6..7a0b0d2e0d3f 100644
 --- a/fs/read_write.c
 +++ b/fs/read_write.c
-@@ -429,10 +429,20 @@ ssize_t kernel_read(struct file *file, void *buf, size_t count, loff_t *pos)
+@@ -568,11 +568,20 @@ static inline void file_pos_write(struct file *file, loff_t pos)
+ 		file->f_pos = pos;
  }
- EXPORT_SYMBOL(kernel_read);
  
-+// KernelSU hook
-+#ifdef CONFIG_KSU
-+extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
-+			       size_t *count_ptr, loff_t **pos);
++#ifdef CONFIG_KSU_MANUAL_HOOK
++extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,
++				char __user **buf_ptr, size_t *count_ptr);
 +#endif
 +
- ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
+ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
  {
- 	ssize_t ret;
+ 	struct fd f = fdget_pos(fd);
+ 	ssize_t ret = -EBADF;
  
-+#ifdef CONFIG_KSU
-+	ksu_handle_vfs_read(&file, &buf, &count, &pos);
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_sys_read(fd, &buf, &count);
 +#endif
 +
- 	if (!(file->f_mode & FMODE_READ))
- 		return -EBADF;
- 	if (!(file->f_mode & FMODE_CAN_READ))
+ 	if (f.file) {
+ 		loff_t pos = file_pos_read(f.file);
+ 		ret = vfs_read(f.file, buf, count, &pos);
 diff --git a/fs/stat.c b/fs/stat.c
-index 0fda4b6b8fb2..e4cd17d7e865 100644
+index 873785dae022..a15f7f88abbb 100644
 --- a/fs/stat.c
 +++ b/fs/stat.c
-@@ -148,6 +148,10 @@ int vfs_statx_fd(unsigned int fd, struct kstat *stat,
+@@ -354,13 +354,26 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+ 	return cp_new_stat(&stat, statbuf);
  }
- EXPORT_SYMBOL(vfs_statx_fd);
  
-+#ifdef CONFIG_KSU
-+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
++				int *flags);
++
++extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
++#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
++extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr); // optional
++#endif
 +#endif
 +
- /**
-  * vfs_statx - Get basic and extra attributes by filename
-  * @dfd: A file descriptor representing the base dir for a relative filename
-@@ -170,6 +174,10 @@ int vfs_statx(int dfd, const char __user *filename, int flags,
- 	int error = -EINVAL;
- 	unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
+ #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
+ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 		struct stat __user *, statbuf, int, flag)
+ {
+ 	struct kstat stat;
+ 	int error;
+-
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -376,6 +389,9 @@ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat(&stat, statbuf);
  
-+#ifdef CONFIG_KSU
-+    ksu_handle_stat(&dfd, &filename, &flags);
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_newfstat_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -496,6 +512,9 @@ SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat64(&stat, statbuf);
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK // for 32-bit
++	ksu_handle_fstat64_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -505,6 +524,9 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit su
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+diff --git a/kernel/reboot.c b/kernel/reboot.c
+index bd30a973fe94..3fbfced94257 100644
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -277,6 +277,11 @@ static DEFINE_MUTEX(reboot_mutex);
+  *
+  * reboot doesn't sync: do that yourself before calling this.
+  */
++
++#ifdef CONFIG_KSU_MANUAL_HOOK
++extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
 +#endif
 +
- 	if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
- 		       AT_EMPTY_PATH | KSTAT_QUERY_FLAGS)) != 0)
- 		return -EINVAL;
+ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 		void __user *, arg)
+ {
+@@ -284,6 +289,9 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 	char buffer[256];
+ 	int ret = 0;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
++#endif
+ 	/* We only trust the superuser with rebooting the system. */
+ 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+ 		return -EPERM;
+diff --git a/kernel/sys.c b/kernel/sys.c
+index a3bef5bd7a3e..0b116d7cf4a2 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -593,6 +593,10 @@
+ 	return retval;
+ }
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
++#endif
+ 
+ /*
+  * This function implements a generic ability to update ruid, euid,
+@@ -606,6 +610,10 @@
+ 	int retval;
+ 	kuid_t kruid, keuid, ksuid;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	(void)ksu_handle_setresuid(ruid, euid, suid);
++#endif
++
+ 	kruid = make_kuid(ns, ruid);
+ 	keuid = make_kuid(ns, euid);
+ 	ksuid = make_kuid(ns, suid);
+diff --git a/drivers/input/input.c b/drivers/input/input.c
+index 1111111111..2222222222 100644
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -436,11 +436,20 @@ static void input_handle_event(struct input_dev *dev,
+  * to 'seed' initial state of a switch or initial position of absolute
+  * axis, etc.
+  */
++#ifdef CONFIG_KSU_MANUAL_HOOK
++extern __attribute__((cold)) int ksu_handle_input_handle_event(
++			unsigned int *type, unsigned int *code, int *value);
++#endif
++
+ void input_event(struct input_dev *dev,
+ 		 unsigned int type, unsigned int code, int value)
+ {
+ 	unsigned long flags;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_input_handle_event(&type, &code, &value);
++#endif
++
+ 	if (is_event_supported(type, dev->evbit, EV_MAX)) {
+ 
+ 		spin_lock_irqsave(&dev->event_lock, flags);
 diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
 index 4d82487a65ae..e73d8b696b37 100644
 --- a/security/selinux/hooks.c
