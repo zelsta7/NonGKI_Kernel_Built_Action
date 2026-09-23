@@ -1,112 +1,45 @@
---- a/security/selinux/hooks.c
-+++ b/security/selinux/hooks.c
-@@ -2328,10 +2328,21 @@
- 			    const struct task_security_struct *old_tsec,
- 			    const struct task_security_struct *new_tsec)
- {
-+#ifdef CONFIG_KSU
-+	static u32 ksu_sid;
-+	char *secdata;
-+#endif
- 	int nnp = (bprm->unsafe & LSM_UNSAFE_NO_NEW_PRIVS);
- 	int nosuid = !mnt_may_suid(bprm->file->f_path.mnt);
-+#ifdef CONFIG_KSU
-+	int rc, error;
-+#else
- 	int rc;
-+#endif
- 	u32 av;
-+#ifdef CONFIG_KSU
-+	u32 seclen;
-+#endif
- 
- 	if (!nnp && !nosuid)
- 		return 0; /* neither NNP nor nosuid */
-@@ -2339,6 +2350,20 @@
- 	if (new_tsec->sid == old_tsec->sid)
- 		return 0; /* No change in credentials */
- 
-+#ifdef CONFIG_KSU
-+	if (!ksu_sid) {
-+		security_secctx_to_secid("u:r:su:s0", strlen("u:r:su:s0"), &ksu_sid);
-+	}
-+	error = security_secid_to_secctx(old_tsec->sid, &secdata, &seclen);
-+	if (!error) {
-+		rc = strcmp("u:r:init:s0", secdata);
-+		security_release_secctx(secdata, seclen);
-+		if (rc == 0 && new_tsec->sid == ksu_sid) {
-+			return 0;
-+		}
-+	}
-+#endif
-+
- 	/*
- 	 * If the policy enables the nnp_nosuid_transition policy capability,
- 	 * then we permit transitions under NNP or nosuid if the
---- a/kernel/sys.c
-+++ b/kernel/sys.c
-@@ -594,6 +594,11 @@
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1883,11 +1883,24 @@
+ 	return retval;
  }
  
- 
 +#ifdef CONFIG_KSU_MANUAL_HOOK
-+__attribute__((hot))
-+extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
++extern bool ksu_execveat_hook __read_mostly;
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
++			void *envp, int *flags);
++extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
++				 void *argv, void *envp, int *flags);
 +#endif
-+
- /*
-  * This function implements a generic ability to update ruid, euid,
-  * and suid.  This allows you to implement the 4.4 compatible seteuid().
-@@ -606,6 +611,10 @@
- 	int retval;
- 	kuid_t kruid, keuid, ksuid;
- 
-+#ifdef CONFIG_KSU_MANUAL_HOOK
-+	(void)ksu_handle_setresuid(ruid, euid, suid);
-+#endif
-+
- 	kruid = make_kuid(ns, ruid);
- 	keuid = make_kuid(ns, euid);
- 	ksuid = make_kuid(ns, suid);
---- a/drivers/input/input.c
-+++ b/drivers/input/input.c
-@@ -436,11 +436,20 @@
-  * to 'seed' initial state of a switch or initial position of absolute
-  * axis, etc.
-  */
-+#ifdef CONFIG_KSU_MANUAL_HOOK
-+extern __attribute__((cold)) int ksu_handle_input_handle_event(
-+			unsigned int *type, unsigned int *code, int *value);
-+#endif
-+
- void input_event(struct input_dev *dev,
- 		 unsigned int type, unsigned int code, int value)
+ static int do_execveat_common(int fd, struct filename *filename,
+ 			      struct user_arg_ptr argv,
+ 			      struct user_arg_ptr envp,
+ 			      int flags)
  {
- 	unsigned long flags;
- 
 +#ifdef CONFIG_KSU_MANUAL_HOOK
-+	ksu_handle_input_handle_event(&type, &code, &value);
++	if (unlikely(ksu_execveat_hook))
++		ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
++	else
++		ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
 +#endif
-+
- 	if (is_event_supported(type, dev->evbit, EV_MAX)) {
+ 	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+ }
  
- 		spin_lock_irqsave(&dev->event_lock, flags);
 --- a/fs/open.c
 +++ b/fs/open.c
-@@ -411,6 +411,12 @@
+@@ -411,6 +411,11 @@
  	return old_cred;
  }
  
 +#ifdef CONFIG_KSU_MANUAL_HOOK
-+__attribute__((hot))
-+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
-+				int *mode, int *flags);
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
++			 int *flags);
 +#endif
 +
  long do_faccessat(int dfd, const char __user *filename, int mode, int flags)
  {
  	struct path path;
-@@ -419,6 +425,10 @@
+@@ -419,6 +424,10 @@
  	unsigned int lookup_flags = LOOKUP_FOLLOW;
  	const struct cred *old_cred = NULL;
  
@@ -119,130 +52,70 @@
  
 --- a/fs/read_write.c
 +++ b/fs/read_write.c
-@@ -568,14 +568,23 @@
- 		file->f_pos = pos;
+@@ -429,10 +429,20 @@
  }
+ EXPORT_SYMBOL(kernel_read);
  
 +#ifdef CONFIG_KSU_MANUAL_HOOK
-+extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,
-+				char __user **buf_ptr, size_t *count_ptr);
++extern bool ksu_vfs_read_hook __read_mostly;
++extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
++			size_t *count_ptr, loff_t **pos);
 +#endif
-+
- SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
  {
- 	struct fd f = fdget_pos(fd);
- 	ssize_t ret = -EBADF;
+ 	ssize_t ret;
  
 +#ifdef CONFIG_KSU_MANUAL_HOOK
-+	ksu_handle_sys_read(fd, &buf, &count);
++	if (unlikely(ksu_vfs_read_hook))
++		ksu_handle_vfs_read(&file, &buf, &count, &pos);
 +#endif
 +
- 	if (f.file) {
- 		loff_t pos = file_pos_read(f.file);
--		
-+
- 		ret = vfs_read(f.file, buf, count, &pos);
- 		if (ret >= 0)
- 			file_pos_write(f.file, pos);
---- a/fs/exec.c
-+++ b/fs/exec.c
-@@ -1883,6 +1883,12 @@
- 	return retval;
- }
- 
-+#ifdef CONFIG_KSU_MANUAL_HOOK
-+__attribute__((hot))
-+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
-+				void *argv, void *envp, int *flags);
-+#endif
-+
- static int do_execveat_common(int fd, struct filename *filename,
- 			      struct user_arg_ptr argv,
- 			      struct user_arg_ptr envp,
-@@ -1906,6 +1912,10 @@
- 	struct user_arg_ptr argv = { .ptr.native = __argv };
- 	struct user_arg_ptr envp = { .ptr.native = __envp };
- 
-+#ifdef CONFIG_KSU_MANUAL_HOOK
-+	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
-+#endif
-+
- 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
- }
- 
-@@ -1934,7 +1944,11 @@
- 		.ptr.compat = __envp,
- 	};
- 
--    return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
-+#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit ksud and 32-on-64 support
-+	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
-+#endif
-+
-+	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
- }
- 
- static int compat_do_execveat(int fd, struct filename *filename,
+ 	if (!(file->f_mode & FMODE_READ))
+ 		return -EBADF;
+ 	if (!(file->f_mode & FMODE_CAN_READ))
 --- a/fs/stat.c
 +++ b/fs/stat.c
-@@ -383,13 +383,27 @@
- 
- #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
+@@ -176,6 +176,10 @@
+ }
+ EXPORT_SYMBOL(vfs_statx_fd);
  
 +#ifdef CONFIG_KSU_MANUAL_HOOK
-+__attribute__((hot))
-+extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
-+				int *flags);
-+
-+extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
-+#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
-+extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr); // optional
-+#endif
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
 +#endif
 +
- SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
- 		struct stat __user *, statbuf, int, flag)
+ /**
+  * vfs_statx - Get basic and extra attributes by filename
+  * @dfd: A file descriptor representing the base dir for a relative filename
+@@ -198,6 +202,10 @@
+ 	int error = -EINVAL;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_stat(&dfd, &filename, &flags);
++#endif
++
+ 	if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
+ 		       AT_EMPTY_PATH | KSTAT_QUERY_FLAGS)) != 0)
+ 		return -EINVAL;
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -377,10 +377,19 @@
+ 	return disposition;
+ }
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++extern bool ksu_input_hook __read_mostly;
++extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
++#endif
++
+ static void input_handle_event(struct input_dev *dev,
+ 			       unsigned int type, unsigned int code, int value)
  {
- 	struct kstat stat;
- 	int error;
- 
--   error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	int disposition = input_get_disposition(dev, type, code, &value);
 +#ifdef CONFIG_KSU_MANUAL_HOOK
-+	ksu_handle_stat(&dfd, &filename, &flag);
++	if (unlikely(ksu_input_hook))
++		ksu_handle_input_handle_event(&type, &code, &value);
 +#endif
-+	error = vfs_fstatat(dfd, filename, &stat, flag);
- 	if (error)
- 		return error;
- 	return cp_new_stat(&stat, statbuf);
-@@ -404,6 +418,9 @@
- 	if (!error)
- 		error = cp_new_stat(&stat, statbuf);
  
-+#ifdef CONFIG_KSU_MANUAL_HOOK
-+	ksu_handle_newfstat_ret(&fd, &statbuf);
-+#endif
- 	return error;
- }
- 
-@@ -524,6 +541,9 @@
- 	if (!error)
- 		error = cp_new_stat64(&stat, statbuf);
- 
-+#ifdef CONFIG_KSU_MANUAL_HOOK // for 32-bit
-+	ksu_handle_fstat64_ret(&fd, &statbuf);
-+#endif
- 	return error;
- }
- 
-@@ -533,7 +553,10 @@
- 	struct kstat stat;
- 	int error;
- 
--    error = vfs_fstatat(dfd, filename, &stat, flag);
-+#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit su
-+	ksu_handle_stat(&dfd, &filename, &flag);
-+#endif
-+	error = vfs_fstatat(dfd, filename, &stat, flag);
- 	if (error)
- 		return error;
- 	return cp_new_stat64(&stat, statbuf);
+ 	if (disposition != INPUT_IGNORE_EVENT && type != EV_SYN)
+ 		add_input_randomness(type, code, value);
